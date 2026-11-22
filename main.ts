@@ -1,14 +1,20 @@
-// A working token-radar-01 entry (Node 22, standard library only).
+// token-radar-01's entry: a token launch radar that reads the sealed snapshot and writes a ranked
+// board a reader can act on. The scoring model (lib/model.ts, radar-2: size power law, seven-day
+// momentum, category, age and chain-quality multipliers) scores every protocol the watchlist names
+// plus the strongest pre-token protocols below the watchlist floor, so the board carries 200 rows:
+// all 40 watchlist protocols, then 160 early candidates picked by TVL. Every row carries the steps
+// to farm that protocol before its token exists, with what each step costs and how long it takes.
 //
-// The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// pre-token protocol with the model in lib/model.ts, writes the ranked board to /output/board.json, and
-// copies this repository's dashboard/ and screenshots/ to /output. Last, it writes /output/dossier.json,
-// the summary the judge reads, with the vendored make.fun library.
+// The run reads /input/snapshot.json (or --input <file|dir>), checks the board against the gate's
+// shape, then writes /output: board.json (the ranked rows), data.js (the same data for the page),
+// copies of this repository's dashboard/ and screenshots/, and last dossier.json, which the judge
+// reads, built with the vendored make.fun library. Both runs of the program must write the same
+// bytes; nothing here reads the clock, the network or anything outside its arguments and /input.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
-// and dashboard/app.js read /output/data.js, which this program writes from the same board. A starting
-// point, not a winner: it covers the watchlist, states the model and gives every protocol a farm plan.
-// Change the model, the page or the plan; keep the gate's shape.
+// and dashboard/app.js read /output/data.js, which this program writes from the same board. The page
+// states the model, covers the whole watchlist and gives every protocol a farm plan; the screenshots
+// show the board, one protocol's detail view and a filtered view.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -18,6 +24,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
+import type { Snapshot } from './lib/model.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
@@ -42,7 +49,29 @@ if (!existsSync(inputFile)) {
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+/** One line on stderr, then exit 2: the return type `never` lets TS know control does not come back. */
+function die(message: string): never {
+  process.stderr.write(message);
+  process.exit(2);
+  throw new Error('unreachable'); // keeps `never` honest even without Node's type definitions
+}
+
+/** The snapshot out of the file's bytes, or one line on stderr and exit 2 when it cannot be scored. */
+function loadSnapshot(path: string): Snapshot {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    die(`token radar: cannot read the snapshot at ${path}: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+  try {
+    return parseSnapshot(text);
+  } catch (err) {
+    die(`token radar: the snapshot at ${path} is not one this model can score: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}
+
+const snapshot = loadSnapshot(inputFile);
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
@@ -85,7 +114,9 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const boardSlugs = new Set(board.map((r) => r.slug));
+const covered = snapshot.watchlist.filter((slug) => boardSlugs.has(slug)).length;
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+  `token radar: model ${radar.model_version}, as of ${snapshot.as_of}: ${board.length} rows (${snapshot.watchlist.length} on the watchlist, ${covered} covered, ${radar.early_size} early candidates below the $${(snapshot.floor_usd / 1e6).toFixed(0)}M floor), ${radar.live_size} live-token protocols set aside\n` +
+    `token radar: wrote board.json (${board.length} rows), data.js, dashboard (3 files), screenshots (${shots.length} images) and dossier.json in ${out}\n`,
 );
